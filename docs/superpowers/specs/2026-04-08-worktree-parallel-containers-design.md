@@ -240,6 +240,42 @@ Temporary branches (`mft/slot-N-*`) are deleted after merge or after 7 days of i
 
 The existing `mount-overrides.json` system applies to worktrees too. If the source repo path is overridden (e.g. `/Users/lenny/github/mashie` → `/Users/lenny/github/matilda/mashie`), the worktree is created under the resolved path.
 
+### Agent Swarms (Opt-In)
+
+The mashie repo has a multi-agent orchestration system with four agents: `@system-architect`, `@implementation`, `@quality-assurance`, and `@integration`. These are powerful but expensive — each subagent sends full context to the API, multiplying token usage 3-4x.
+
+**Default behavior:** Agent swarms are disabled. The agent works alone (current behavior). The mashie CLAUDE.md already instructs the agent not to use them for routine work.
+
+**Opt-in trigger:** When the user explicitly asks for it:
+```
+You:   @mft use agents: implement the full order management system
+       → agent spawns subagents via TeamCreate within the container
+```
+
+Keywords that trigger swarm mode: "use agents", "use the agents", "with agents", "agent swarm".
+
+**How it works with worktrees:**
+
+- Agent swarms run **within a single container/slot** — the subagents share the same worktree
+- This is the existing Claude Code agent teams feature (`TeamCreate` tool) — already enabled via `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1'`
+- The subagents (`@system-architect`, `@implementation`, etc.) are defined in the mashie repo's `.claude/agents/` directory and are auto-discovered via `additionalDirectories`
+- Swarm containers should get a worktree (slots 1-N), not slot 0, to avoid interfering with ongoing work
+
+**Container context for swarm mode:**
+
+The agent receives:
+```
+[System: Agent swarm requested. You may use the agent orchestration system
+ (@system-architect, @implementation, @quality-assurance, @integration)
+ for this task. See .claude/QUICK_START_AGENTS.md for the workflow.]
+```
+
+**Resource considerations:**
+
+- Swarm tasks are heavy — each may spawn 2-4 subagents, each consuming API tokens
+- `maxParallel` still applies — a swarm in slot 1 + regular work in slot 0 = 2 slots used
+- The subagents within a swarm don't count against `maxParallel` (they're internal to the container)
+
 ## What Changes
 
 | File | Change |
