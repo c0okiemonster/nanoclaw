@@ -64,6 +64,7 @@ import {
   loadSenderAllowlist,
   shouldDropMessage,
 } from './sender-allowlist.js';
+import { startSessionCleanup } from './session-cleanup.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup, WorktreeSlot } from './types.js';
 import { WorktreeManager } from './worktree-manager.js';
@@ -953,6 +954,7 @@ async function main(): Promise<void> {
       }
     },
   });
+  startSessionCleanup();
   queue.setProcessMessagesFn(async (groupKey: string, slotId: number) => {
     return processGroupMessages(groupKey, slotId);
   });
