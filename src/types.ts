@@ -30,9 +30,23 @@ export interface AllowedRoot {
 export interface ContainerConfig {
   additionalMounts?: AdditionalMount[];
   timeout?: number; // Default: 300000 (5 minutes)
+  ports?: string[]; // Port mappings (e.g. ["3000:3000", "8000:8000"])
+  memory?: string; // Docker --memory flag (e.g. "12g")
+  cpus?: string; // Docker --cpus flag (e.g. "4", "0" = unlimited)
+  maxParallel?: number; // Default: 1. Max concurrent containers for this group.
+}
+
+export interface WorktreeSlot {
+  slotId: number;
+  worktreePath: string;
+  sourcePath: string;
+  branch: string;
+  ref?: string;
+  createdAt: number;
 }
 
 export interface RegisteredGroup {
+  jid?: string; // The JID this group is registered under (set when iterating flat lists)
   name: string;
   folder: string;
   trigger: string;
