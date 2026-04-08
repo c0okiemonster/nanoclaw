@@ -433,6 +433,67 @@ describe('GroupQueue', () => {
     await vi.advanceTimersByTimeAsync(10);
   });
 
+  // --- Multi-slot routing ---
+
+  describe('multi-slot routing', () => {
+    it('routes to slot 0 first when idle', async () => {
+      const slots: number[] = [];
+      const processMessages = vi.fn(
+        async (_groupKey: string, slotId: number) => {
+          slots.push(slotId);
+          await new Promise((resolve) => setTimeout(resolve, 100));
+          return true;
+        },
+      );
+      queue.setProcessMessagesFn(processMessages);
+      queue.enqueueMessageCheck('group1');
+      await vi.advanceTimersByTimeAsync(200);
+      expect(slots).toEqual([0]);
+    });
+
+    it('spins up parallel slot when slot 0 is busy and maxParallel > 1', async () => {
+      const slots: number[] = [];
+      const processMessages = vi.fn(
+        async (_groupKey: string, slotId: number) => {
+          slots.push(slotId);
+          await new Promise((resolve) => setTimeout(resolve, 500));
+          return true;
+        },
+      );
+      queue.setProcessMessagesFn(processMessages);
+      queue.setMaxParallel('group1', 4);
+
+      queue.enqueueMessageCheck('group1');
+      await vi.advanceTimersByTimeAsync(50);
+      queue.enqueueMessageCheck('group1');
+      await vi.advanceTimersByTimeAsync(600);
+
+      expect(slots).toContain(0);
+      expect(slots).toContain(1);
+    });
+
+    it('queues when all slots are busy', async () => {
+      let callCount = 0;
+      const processMessages = vi.fn(async () => {
+        callCount++;
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        return true;
+      });
+      queue.setProcessMessagesFn(processMessages);
+      queue.setMaxParallel('group1', 2);
+
+      queue.enqueueMessageCheck('group1');
+      await vi.advanceTimersByTimeAsync(50);
+      queue.enqueueMessageCheck('group1');
+      await vi.advanceTimersByTimeAsync(50);
+      queue.enqueueMessageCheck('group1');
+
+      expect(callCount).toBe(2);
+      await vi.advanceTimersByTimeAsync(600);
+      expect(callCount).toBe(3);
+    });
+  });
+
   it('preempts when idle arrives with pending tasks', async () => {
     const fs = await import('fs');
     let resolveProcess: () => void;
