@@ -283,7 +283,10 @@ export function _setRegisteredGroups(
  * Called by the GroupQueue when it's this group's turn.
  * groupKey is the folder name (unique across all registrations).
  */
-async function processGroupMessages(groupKey: string, slotId: number = 0): Promise<boolean> {
+async function processGroupMessages(
+  groupKey: string,
+  slotId: number = 0,
+): Promise<boolean> {
   // Reverse-lookup: find the group by folder
   const group = folderToGroup.get(groupKey);
   if (!group || !group.jid) return true;
@@ -510,9 +513,8 @@ async function runAgent(
 ): Promise<'success' | 'error'> {
   const isMain = group.isMain === true;
   const slotId = worktreeSlot?.slotId ?? 0;
-  const sessionId = slotId === 0
-    ? sessions[group.folder]
-    : getSession(group.folder, slotId);
+  const sessionId =
+    slotId === 0 ? sessions[group.folder] : getSession(group.folder, slotId);
 
   // Update tasks snapshot for container to read (filtered by group)
   const tasks = getAllTasks();
@@ -562,7 +564,8 @@ async function runAgent(
         groupFolder: group.folder,
         chatJid,
         isMain,
-        keepAlive: slotId === 0 && (group.containerConfig?.ports?.length ?? 0) > 0,
+        keepAlive:
+          slotId === 0 && (group.containerConfig?.ports?.length ?? 0) > 0,
         slotId,
         worktreeRef: worktreeSlot?.ref,
         assistantName: ASSISTANT_NAME,
@@ -961,6 +964,20 @@ async function main(): Promise<void> {
       if (maxParallel > 1) {
         queue.setMaxParallel(group.folder, maxParallel);
       }
+    }
+  }
+
+  // Clean up stale worktrees and ephemeral slot sessions from previous crashes
+  for (const groups of Object.values(registeredGroups)) {
+    for (const group of groups) {
+      if (
+        (group.containerConfig?.maxParallel ?? 1) > 1 &&
+        group.containerConfig?.additionalMounts?.length
+      ) {
+        const repoMount = group.containerConfig.additionalMounts[0];
+        worktreeManager.cleanupStale(repoMount.hostPath, group.folder);
+      }
+      deleteSlotSessions(group.folder);
     }
   }
 
