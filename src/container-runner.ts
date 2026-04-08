@@ -13,10 +13,15 @@ import {
   DATA_DIR,
   GROUPS_DIR,
   IDLE_TIMEOUT,
+  MOUNT_OVERRIDES_PATH,
   ONECLI_URL,
   TIMEZONE,
 } from './config.js';
-import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
+import {
+  resolveGroupFolderPath,
+  resolveGroupIpcPath,
+  resolveSlotIpcPath,
+} from './group-folder.js';
 import { logger } from './logger.js';
 import {
   CONTAINER_RUNTIME_BIN,
@@ -26,9 +31,52 @@ import {
 } from './container-runtime.js';
 import { OneCLI } from '@onecli-sh/sdk';
 import { validateAdditionalMounts } from './mount-security.js';
-import { RegisteredGroup } from './types.js';
+import { RegisteredGroup, WorktreeSlot } from './types.js';
 
 const onecli = new OneCLI({ url: ONECLI_URL });
+
+/**
+ * Per-machine mount path overrides.
+ * Loaded from ~/.config/nanoclaw/mount-overrides.json (not synced).
+ * Format: { "/original/path": "/local/path", ... }
+ */
+let mountOverrides: Record<string, string> | null = null;
+function loadMountOverrides(): Record<string, string> {
+  if (mountOverrides !== null) return mountOverrides;
+  try {
+    if (fs.existsSync(MOUNT_OVERRIDES_PATH)) {
+      mountOverrides = JSON.parse(
+        fs.readFileSync(MOUNT_OVERRIDES_PATH, 'utf-8'),
+      );
+      logger.info(
+        {
+          path: MOUNT_OVERRIDES_PATH,
+          count: Object.keys(mountOverrides!).length,
+        },
+        'Mount overrides loaded',
+      );
+    } else {
+      mountOverrides = {};
+    }
+  } catch (err) {
+    logger.warn(
+      { err, path: MOUNT_OVERRIDES_PATH },
+      'Failed to load mount overrides',
+    );
+    mountOverrides = {};
+  }
+  return mountOverrides!;
+}
+
+function resolveHostPath(hostPath: string): string {
+  const overrides = loadMountOverrides();
+  for (const [from, to] of Object.entries(overrides)) {
+    if (hostPath === from || hostPath.startsWith(from + '/')) {
+      return hostPath.replace(from, to);
+    }
+  }
+  return hostPath;
+}
 
 // Sentinel markers for robust output parsing (must match agent-runner)
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
@@ -41,6 +89,9 @@ export interface ContainerInput {
   chatJid: string;
   isMain: boolean;
   isScheduledTask?: boolean;
+  keepAlive?: boolean;
+  slotId?: number;
+  worktreeRef?: string;
   assistantName?: string;
   script?: string;
   imageAttachments?: Array<{ relativePath: string; mediaType: string }>;
@@ -62,6 +113,7 @@ interface VolumeMount {
 function buildVolumeMounts(
   group: RegisteredGroup,
   isMain: boolean,
+  worktreeSlot?: WorktreeSlot,
 ): VolumeMount[] {
   const mounts: VolumeMount[] = [];
   const projectRoot = process.cwd();
@@ -168,7 +220,8 @@ function buildVolumeMounts(
 
   // Per-group IPC namespace: each group gets its own IPC directory
   // This prevents cross-group privilege escalation via IPC
-  const groupIpcDir = resolveGroupIpcPath(group.folder);
+  const slotId = worktreeSlot?.slotId ?? 0;
+  const groupIpcDir = resolveSlotIpcPath(group.folder, slotId);
   fs.mkdirSync(path.join(groupIpcDir, 'messages'), { recursive: true });
   fs.mkdirSync(path.join(groupIpcDir, 'tasks'), { recursive: true });
   fs.mkdirSync(path.join(groupIpcDir, 'input'), { recursive: true });
@@ -213,8 +266,19 @@ function buildVolumeMounts(
 
   // Additional mounts validated against external allowlist (tamper-proof from containers)
   if (group.containerConfig?.additionalMounts) {
+    // Apply per-machine mount overrides before validation so the allowlist
+    // check sees the real local path (e.g. /Users/x/github/mashie →
+    // /Users/x/github/matilda/mashie on a different machine).
+    const resolvedMounts = group.containerConfig.additionalMounts.map((m) => {
+      const resolved = { ...m, hostPath: resolveHostPath(m.hostPath) };
+      // If this mount matches the worktree source, use the worktree path instead
+      if (worktreeSlot && resolved.hostPath === worktreeSlot.sourcePath) {
+        return { ...resolved, hostPath: worktreeSlot.worktreePath };
+      }
+      return resolved;
+    });
     const validatedMounts = validateAdditionalMounts(
-      group.containerConfig.additionalMounts,
+      resolvedMounts,
       group.name,
       isMain,
     );
@@ -228,11 +292,42 @@ async function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
   agentIdentifier?: string,
+  groupFolder?: string,
+  portMappings?: string[],
+  resourceLimits?: { memory?: string; cpus?: string },
 ): Promise<string[]> {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
 
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
+
+  // Per-group env file (data/env/<folder>.env) for group-specific credentials
+  if (groupFolder) {
+    const groupEnvFile = path.join(DATA_DIR, 'env', `${groupFolder}.env`);
+    if (fs.existsSync(groupEnvFile)) {
+      args.push('--env-file', groupEnvFile);
+      logger.debug({ containerName, groupFolder }, 'Per-group env file loaded');
+    }
+  }
+
+  // Port mappings from container config (e.g. dev servers accessible from host)
+  if (portMappings) {
+    for (const mapping of portMappings) {
+      args.push('-p', mapping);
+    }
+    logger.debug(
+      { containerName, ports: portMappings },
+      'Port mappings applied',
+    );
+  }
+
+  // Resource limits (memory, CPU)
+  if (resourceLimits?.memory) {
+    args.push('--memory', resourceLimits.memory);
+  }
+  if (resourceLimits?.cpus && resourceLimits.cpus !== '0') {
+    args.push('--cpus', resourceLimits.cpus);
+  }
 
   // OneCLI gateway handles credential injection — containers never see real secrets.
   // The gateway intercepts HTTPS traffic and injects API keys or OAuth tokens.
@@ -263,10 +358,11 @@ async function buildContainerArgs(
   }
 
   for (const mount of mounts) {
+    const hostPath = resolveHostPath(mount.hostPath);
     if (mount.readonly) {
-      args.push(...readonlyMountArgs(mount.hostPath, mount.containerPath));
+      args.push(...readonlyMountArgs(hostPath, mount.containerPath));
     } else {
-      args.push('-v', `${mount.hostPath}:${mount.containerPath}`);
+      args.push('-v', `${hostPath}:${mount.containerPath}`);
     }
   }
 
@@ -280,13 +376,14 @@ export async function runContainerAgent(
   input: ContainerInput,
   onProcess: (proc: ChildProcess, containerName: string) => void,
   onOutput?: (output: ContainerOutput) => Promise<void>,
+  worktreeSlot?: WorktreeSlot,
 ): Promise<ContainerOutput> {
   const startTime = Date.now();
 
   const groupDir = resolveGroupFolderPath(group.folder);
   fs.mkdirSync(groupDir, { recursive: true });
 
-  const mounts = buildVolumeMounts(group, input.isMain);
+  const mounts = buildVolumeMounts(group, input.isMain, worktreeSlot);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
   // Main group uses the default OneCLI agent; others use their own agent.
@@ -297,6 +394,12 @@ export async function runContainerAgent(
     mounts,
     containerName,
     agentIdentifier,
+    group.folder,
+    (input.slotId ?? 0) === 0 ? group.containerConfig?.ports : undefined,
+    {
+      memory: group.containerConfig?.memory,
+      cpus: group.containerConfig?.cpus,
+    },
   );
 
   logger.debug(
