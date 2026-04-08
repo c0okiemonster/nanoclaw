@@ -41,7 +41,7 @@ interface ContainerInput {
 
 interface ImageContentBlock {
   type: 'image';
-  source: { type: 'base64'; media_type: string; data: string };
+  source: { type: 'base64'; media_type: 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp'; data: string };
 }
 interface TextContentBlock {
   type: 'text';
@@ -82,7 +82,7 @@ const IPC_POLL_MS = 500;
  * Push-based async iterable for streaming user messages to the SDK.
  * Keeps the iterable alive until end() is called, preventing isSingleUserTurn.
  */
-class MessageStream {
+class MessageStream implements AsyncIterable<SDKUserMessage> {
   private queue: SDKUserMessage[] = [];
   private waiting: (() => void) | null = null;
   private done = false;
@@ -417,7 +417,7 @@ async function runQuery(
       const imgPath = path.join('/workspace/group', img.relativePath);
       try {
         const data = fs.readFileSync(imgPath).toString('base64');
-        blocks.push({ type: 'image', source: { type: 'base64', media_type: img.mediaType, data } });
+        blocks.push({ type: 'image', source: { type: 'base64', media_type: img.mediaType as ImageContentBlock['source']['media_type'], data } });
       } catch (err) {
         log(`Failed to load image: ${imgPath}`);
       }
