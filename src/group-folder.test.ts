@@ -6,6 +6,7 @@ import {
   isValidGroupFolder,
   resolveGroupFolderPath,
   resolveGroupIpcPath,
+  resolveSlotIpcPath,
 } from './group-folder.js';
 
 describe('group folder validation', () => {
@@ -39,5 +40,22 @@ describe('group folder validation', () => {
   it('throws for unsafe folder names', () => {
     expect(() => resolveGroupFolderPath('../../etc')).toThrow();
     expect(() => resolveGroupIpcPath('/tmp')).toThrow();
+  });
+});
+
+describe('resolveSlotIpcPath', () => {
+  it('returns base IPC path for slot 0', () => {
+    const result = resolveSlotIpcPath('test_group', 0);
+    expect(result).toBe(resolveGroupIpcPath('test_group'));
+  });
+
+  it('returns slot-specific path for slot > 0', () => {
+    const result = resolveSlotIpcPath('test_group', 1);
+    expect(result).toContain('test_group');
+    expect(result).toContain('slot-1');
+  });
+
+  it('rejects invalid group folders', () => {
+    expect(() => resolveSlotIpcPath('../escape', 1)).toThrow();
   });
 });

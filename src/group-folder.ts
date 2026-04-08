@@ -42,3 +42,12 @@ export function resolveGroupIpcPath(folder: string): string {
   ensureWithinBase(ipcBaseDir, ipcPath);
   return ipcPath;
 }
+
+export function resolveSlotIpcPath(folder: string, slotId: number): string {
+  if (slotId === 0) return resolveGroupIpcPath(folder);
+  assertValidGroupFolder(folder);
+  const ipcBaseDir = path.resolve(DATA_DIR, 'ipc');
+  const ipcPath = path.resolve(ipcBaseDir, folder, `slot-${slotId}`);
+  ensureWithinBase(ipcBaseDir, ipcPath);
+  return ipcPath;
+}
