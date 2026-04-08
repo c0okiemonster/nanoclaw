@@ -74,13 +74,14 @@ function createSchema(database: Database.Database): void {
       session_id TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS registered_groups (
-      jid TEXT PRIMARY KEY,
+      jid TEXT NOT NULL,
       name TEXT NOT NULL,
       folder TEXT NOT NULL UNIQUE,
       trigger_pattern TEXT NOT NULL,
       added_at TEXT NOT NULL,
       container_config TEXT,
-      requires_trigger INTEGER DEFAULT 1
+      requires_trigger INTEGER DEFAULT 1,
+      PRIMARY KEY (jid, folder)
     );
   `);
 
@@ -126,6 +127,38 @@ function createSchema(database: Database.Database): void {
     /* column already exists */
   }
 
+  // Migrate registered_groups from jid-only PK to composite (jid, folder) PK
+  try {
+    // Check if old schema: jid is the sole PK (no composite key)
+    const tableInfo = database
+      .prepare(`PRAGMA table_info(registered_groups)`)
+      .all() as Array<{ name: string; pk: number }>;
+    const pkColumns = tableInfo.filter((c) => c.pk > 0);
+    if (pkColumns.length === 1 && pkColumns[0].name === 'jid') {
+      database.exec(`
+        CREATE TABLE registered_groups_new (
+          jid TEXT NOT NULL,
+          name TEXT NOT NULL,
+          folder TEXT NOT NULL UNIQUE,
+          trigger_pattern TEXT NOT NULL,
+          added_at TEXT NOT NULL,
+          container_config TEXT,
+          requires_trigger INTEGER DEFAULT 1,
+          is_main INTEGER DEFAULT 0,
+          PRIMARY KEY (jid, folder)
+        );
+        INSERT INTO registered_groups_new
+          SELECT jid, name, folder, trigger_pattern, added_at, container_config, requires_trigger, is_main
+          FROM registered_groups;
+        DROP TABLE registered_groups;
+        ALTER TABLE registered_groups_new RENAME TO registered_groups;
+      `);
+      logger.info('Migrated registered_groups to composite PK (jid, folder)');
+    }
+  } catch {
+    /* migration already applied or table doesn't exist yet */
+  }
+
   // Add channel and is_group columns if they don't exist (migration for existing DBs)
   try {
     database.exec(`ALTER TABLE chats ADD COLUMN channel TEXT`);
@@ -145,6 +178,24 @@ function createSchema(database: Database.Database): void {
     );
   } catch {
     /* columns already exist */
+  }
+
+  // Migrate sessions to support slot_id for parallel container slots
+  try {
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS sessions_new (
+        group_folder TEXT NOT NULL,
+        slot_id INTEGER NOT NULL DEFAULT 0,
+        session_id TEXT NOT NULL,
+        PRIMARY KEY (group_folder, slot_id)
+      );
+      INSERT OR IGNORE INTO sessions_new (group_folder, slot_id, session_id)
+        SELECT group_folder, 0, session_id FROM sessions;
+      DROP TABLE sessions;
+      ALTER TABLE sessions_new RENAME TO sessions;
+    `);
+  } catch {
+    // Already migrated
   }
 }
 
@@ -558,26 +609,44 @@ export function setRouterState(key: string, value: string): void {
 
 // --- Session accessors ---
 
-export function getSession(groupFolder: string): string | undefined {
+export function getSession(
+  groupFolder: string,
+  slotId: number = 0,
+): string | undefined {
   const row = db
-    .prepare('SELECT session_id FROM sessions WHERE group_folder = ?')
-    .get(groupFolder) as { session_id: string } | undefined;
+    .prepare(
+      'SELECT session_id FROM sessions WHERE group_folder = ? AND slot_id = ?',
+    )
+    .get(groupFolder, slotId) as { session_id: string } | undefined;
   return row?.session_id;
 }
 
-export function setSession(groupFolder: string, sessionId: string): void {
+export function setSession(
+  groupFolder: string,
+  sessionId: string,
+  slotId: number = 0,
+): void {
   db.prepare(
-    'INSERT OR REPLACE INTO sessions (group_folder, session_id) VALUES (?, ?)',
-  ).run(groupFolder, sessionId);
+    'INSERT OR REPLACE INTO sessions (group_folder, slot_id, session_id) VALUES (?, ?, ?)',
+  ).run(groupFolder, slotId, sessionId);
 }
 
-export function deleteSession(groupFolder: string): void {
-  db.prepare('DELETE FROM sessions WHERE group_folder = ?').run(groupFolder);
+export function deleteSession(groupFolder: string, slotId: number = 0): void {
+  db.prepare('DELETE FROM sessions WHERE group_folder = ? AND slot_id = ?').run(
+    groupFolder,
+    slotId,
+  );
+}
+
+export function deleteSlotSessions(groupFolder: string): void {
+  db.prepare('DELETE FROM sessions WHERE group_folder = ? AND slot_id > 0').run(
+    groupFolder,
+  );
 }
 
 export function getAllSessions(): Record<string, string> {
   const rows = db
-    .prepare('SELECT group_folder, session_id FROM sessions')
+    .prepare('SELECT group_folder, session_id FROM sessions WHERE slot_id = 0')
     .all() as Array<{ group_folder: string; session_id: string }>;
   const result: Record<string, string> = {};
   for (const row of rows) {
@@ -588,12 +657,51 @@ export function getAllSessions(): Record<string, string> {
 
 // --- Registered group accessors ---
 
-export function getRegisteredGroup(
-  jid: string,
+export function getRegisteredGroup(jid: string): RegisteredGroup[] {
+  const rows = db
+    .prepare('SELECT * FROM registered_groups WHERE jid = ?')
+    .all(jid) as Array<{
+    jid: string;
+    name: string;
+    folder: string;
+    trigger_pattern: string;
+    added_at: string;
+    container_config: string | null;
+    requires_trigger: number | null;
+    is_main: number | null;
+  }>;
+  const result: RegisteredGroup[] = [];
+  for (const row of rows) {
+    if (!isValidGroupFolder(row.folder)) {
+      logger.warn(
+        { jid: row.jid, folder: row.folder },
+        'Skipping registered group with invalid folder',
+      );
+      continue;
+    }
+    result.push({
+      jid: row.jid,
+      name: row.name,
+      folder: row.folder,
+      trigger: row.trigger_pattern,
+      added_at: row.added_at,
+      containerConfig: row.container_config
+        ? JSON.parse(row.container_config)
+        : undefined,
+      requiresTrigger:
+        row.requires_trigger === null ? undefined : row.requires_trigger === 1,
+      isMain: row.is_main === 1 ? true : undefined,
+    });
+  }
+  return result;
+}
+
+export function getRegisteredGroupByFolder(
+  folder: string,
 ): (RegisteredGroup & { jid: string }) | undefined {
   const row = db
-    .prepare('SELECT * FROM registered_groups WHERE jid = ?')
-    .get(jid) as
+    .prepare('SELECT * FROM registered_groups WHERE folder = ?')
+    .get(folder) as
     | {
         jid: string;
         name: string;
@@ -632,6 +740,8 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
   if (!isValidGroupFolder(group.folder)) {
     throw new Error(`Invalid group folder "${group.folder}" for JID ${jid}`);
   }
+  // Use INSERT OR REPLACE with composite PK (jid, folder).
+  // The UNIQUE constraint on folder ensures no two JIDs claim the same folder.
   db.prepare(
     `INSERT OR REPLACE INTO registered_groups (jid, name, folder, trigger_pattern, added_at, container_config, requires_trigger, is_main)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -647,7 +757,7 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
   );
 }
 
-export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
+export function getAllRegisteredGroups(): Record<string, RegisteredGroup[]> {
   const rows = db.prepare('SELECT * FROM registered_groups').all() as Array<{
     jid: string;
     name: string;
@@ -658,7 +768,7 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
     requires_trigger: number | null;
     is_main: number | null;
   }>;
-  const result: Record<string, RegisteredGroup> = {};
+  const result: Record<string, RegisteredGroup[]> = {};
   for (const row of rows) {
     if (!isValidGroupFolder(row.folder)) {
       logger.warn(
@@ -667,7 +777,8 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
       );
       continue;
     }
-    result[row.jid] = {
+    const group: RegisteredGroup = {
+      jid: row.jid,
       name: row.name,
       folder: row.folder,
       trigger: row.trigger_pattern,
@@ -679,6 +790,10 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
         row.requires_trigger === null ? undefined : row.requires_trigger === 1,
       isMain: row.is_main === 1 ? true : undefined,
     };
+    if (!result[row.jid]) {
+      result[row.jid] = [];
+    }
+    result[row.jid].push(group);
   }
   return result;
 }

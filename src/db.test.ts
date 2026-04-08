@@ -3,14 +3,19 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import {
   _initTestDatabase,
   createTask,
+  deleteSession,
+  deleteSlotSessions,
   deleteTask,
   getAllChats,
   getAllRegisteredGroups,
+  getAllSessions,
   getLastBotMessageTimestamp,
   getMessagesSince,
   getNewMessages,
+  getSession,
   getTaskById,
   setRegisteredGroup,
+  setSession,
   storeChatMetadata,
   storeMessage,
   updateTask,
@@ -550,10 +555,11 @@ describe('registered group isMain', () => {
     });
 
     const groups = getAllRegisteredGroups();
-    const group = groups['main@s.whatsapp.net'];
-    expect(group).toBeDefined();
-    expect(group.isMain).toBe(true);
-    expect(group.folder).toBe('whatsapp_main');
+    const groupArr = groups['main@s.whatsapp.net'];
+    expect(groupArr).toBeDefined();
+    expect(groupArr).toHaveLength(1);
+    expect(groupArr[0].isMain).toBe(true);
+    expect(groupArr[0].folder).toBe('whatsapp_main');
   });
 
   it('omits isMain for non-main groups', () => {
@@ -565,8 +571,78 @@ describe('registered group isMain', () => {
     });
 
     const groups = getAllRegisteredGroups();
-    const group = groups['group@g.us'];
-    expect(group).toBeDefined();
-    expect(group.isMain).toBeUndefined();
+    const groupArr = groups['group@g.us'];
+    expect(groupArr).toBeDefined();
+    expect(groupArr).toHaveLength(1);
+    expect(groupArr[0].isMain).toBeUndefined();
+  });
+
+  it('supports multiple registrations for the same JID', () => {
+    const jid = '46723210738@s.whatsapp.net';
+    setRegisteredGroup(jid, {
+      name: 'Floke',
+      folder: 'whatsapp_main',
+      trigger: '@Floke',
+      added_at: '2024-01-01T00:00:00.000Z',
+      isMain: true,
+    });
+    setRegisteredGroup(jid, {
+      name: 'MFT',
+      folder: 'whatsapp_mft',
+      trigger: '@mft',
+      added_at: '2024-01-01T00:00:01.000Z',
+      requiresTrigger: true,
+    });
+
+    const groups = getAllRegisteredGroups();
+    const arr = groups[jid];
+    expect(arr).toHaveLength(2);
+    expect(arr.map((g) => g.folder).sort()).toEqual([
+      'whatsapp_main',
+      'whatsapp_mft',
+    ]);
+    expect(arr.find((g) => g.folder === 'whatsapp_main')?.isMain).toBe(true);
+    expect(arr.find((g) => g.folder === 'whatsapp_mft')?.trigger).toBe('@mft');
+  });
+});
+
+// --- Session slot_id support ---
+
+describe('session slot_id', () => {
+  it('stores and retrieves session for slot 0 (default)', () => {
+    setSession('g', 's');
+    expect(getSession('g')).toBe('s');
+  });
+
+  it('stores and retrieves session for a specific slot', () => {
+    setSession('g', 's1', 1);
+    expect(getSession('g', 1)).toBe('s1');
+    expect(getSession('g')).toBeUndefined();
+  });
+
+  it('deletes session for a specific slot', () => {
+    setSession('g', 's0');
+    setSession('g', 's1', 1);
+    deleteSession('g', 1);
+    expect(getSession('g', 1)).toBeUndefined();
+    expect(getSession('g')).toBe('s0');
+  });
+
+  it('getAllSessions returns slot 0 sessions only', () => {
+    setSession('g', 's0');
+    setSession('g', 's1', 1);
+    const sessions = getAllSessions();
+    expect(sessions['g']).toBe('s0');
+    expect(Object.keys(sessions)).toHaveLength(1);
+  });
+
+  it('deleteSlotSessions removes all non-zero slot sessions', () => {
+    setSession('g', 's0');
+    setSession('g', 's1', 1);
+    setSession('g', 's2', 2);
+    deleteSlotSessions('g');
+    expect(getSession('g')).toBe('s0');
+    expect(getSession('g', 1)).toBeUndefined();
+    expect(getSession('g', 2)).toBeUndefined();
   });
 });
