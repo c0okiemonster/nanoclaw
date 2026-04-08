@@ -395,7 +395,9 @@ export async function runContainerAgent(
     containerName,
     agentIdentifier,
     group.folder,
-    (input.slotId ?? 0) === 0 && !input.isScheduledTask ? group.containerConfig?.ports : undefined,
+    (input.slotId ?? 0) === 0 && !input.isScheduledTask
+      ? group.containerConfig?.ports
+      : undefined,
     {
       memory: group.containerConfig?.memory,
       cpus: group.containerConfig?.cpus,
