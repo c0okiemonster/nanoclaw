@@ -31,6 +31,9 @@ interface ContainerInput {
   chatJid: string;
   isMain: boolean;
   isScheduledTask?: boolean;
+  keepAlive?: boolean;
+  slotId?: number;
+  worktreeRef?: string;
   assistantName?: string;
   script?: string;
   imageAttachments?: Array<{ relativePath: string; mediaType: string }>;
@@ -650,6 +653,12 @@ async function main(): Promise<void> {
       /* may not exist */
     }
     log(`Received input for group: ${containerInput.groupFolder}`);
+    if (containerInput.slotId && containerInput.slotId > 0) {
+      log(`Running in parallel slot ${containerInput.slotId} (worktree mode)`);
+      if (containerInput.worktreeRef) {
+        log(`Worktree ref: ${containerInput.worktreeRef}`);
+      }
+    }
   } catch (err) {
     writeOutput({
       status: 'error',
@@ -710,6 +719,10 @@ async function main(): Promise<void> {
   }
 
   // Query loop: run query → wait for IPC message → run new query → repeat
+  const keepAlive = containerInput.keepAlive === true;
+  if (keepAlive) {
+    log('Keep-alive mode enabled — container will stay alive between queries');
+  }
   let resumeAt: string | undefined;
   try {
     while (true) {
@@ -732,12 +745,16 @@ async function main(): Promise<void> {
         resumeAt = queryResult.lastAssistantUuid;
       }
 
-      // If _close was consumed during the query, exit immediately.
-      // Don't emit a session-update marker (it would reset the host's
-      // idle timer and cause a 30-min delay before the next _close).
+      // If _close was consumed during the query, exit unless keep-alive.
+      // In keep-alive mode, _close just ends the current query but the
+      // container stays alive so dev servers aren't killed.
       if (queryResult.closedDuringQuery) {
-        log('Close sentinel consumed during query, exiting');
-        break;
+        if (keepAlive) {
+          log('Close sentinel consumed during query, but keep-alive — staying alive');
+        } else {
+          log('Close sentinel consumed during query, exiting');
+          break;
+        }
       }
 
       // Emit session update so host can track it
@@ -748,6 +765,10 @@ async function main(): Promise<void> {
       // Wait for the next message or _close sentinel
       const nextMessage = await waitForIpcMessage();
       if (nextMessage === null) {
+        if (keepAlive) {
+          log('Close sentinel received, but keep-alive — staying alive');
+          continue;
+        }
         log('Close sentinel received, exiting');
         break;
       }
