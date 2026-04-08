@@ -34,16 +34,16 @@ const THIRD_GROUP: RegisteredGroup = {
   added_at: '2024-01-01T00:00:00.000Z',
 };
 
-let groups: Record<string, RegisteredGroup>;
+let groups: Record<string, RegisteredGroup[]>;
 let deps: IpcDeps;
 
 beforeEach(() => {
   _initTestDatabase();
 
   groups = {
-    'main@g.us': MAIN_GROUP,
-    'other@g.us': OTHER_GROUP,
-    'third@g.us': THIRD_GROUP,
+    'main@g.us': [MAIN_GROUP],
+    'other@g.us': [OTHER_GROUP],
+    'third@g.us': [THIRD_GROUP],
   };
 
   // Populate DB as well
@@ -55,9 +55,14 @@ beforeEach(() => {
     sendMessage: async () => {},
     registeredGroups: () => groups,
     registerGroup: (jid, group) => {
-      groups[jid] = group;
+      if (!groups[jid]) groups[jid] = [];
+      const idx = groups[jid].findIndex((g) => g.folder === group.folder);
+      if (idx >= 0) {
+        groups[jid][idx] = group;
+      } else {
+        groups[jid].push(group);
+      }
       setRegisteredGroup(jid, group);
-      // Mock the fs.mkdirSync that registerGroup does
     },
     syncGroups: async () => {},
     getAvailableGroups: () => [],
@@ -346,7 +351,7 @@ describe('register_group authorization', () => {
     );
 
     // registeredGroups should not have changed
-    expect(groups['new@g.us']).toBeUndefined();
+    expect(groups['new@g.us']).toBeUndefined(); // never created
   });
 
   it('main group cannot register with unsafe folder path', async () => {
@@ -363,7 +368,7 @@ describe('register_group authorization', () => {
       deps,
     );
 
-    expect(groups['new@g.us']).toBeUndefined();
+    expect(groups['new@g.us']).toBeUndefined(); // never created
   });
 });
 
@@ -392,10 +397,13 @@ describe('IPC message authorization', () => {
     sourceGroup: string,
     isMain: boolean,
     targetChatJid: string,
-    registeredGroups: Record<string, RegisteredGroup>,
+    registeredGroups: Record<string, RegisteredGroup[]>,
   ): boolean {
-    const targetGroup = registeredGroups[targetChatJid];
-    return isMain || (!!targetGroup && targetGroup.folder === sourceGroup);
+    const targetGroups = registeredGroups[targetChatJid];
+    return (
+      isMain ||
+      (!!targetGroups && targetGroups.some((g) => g.folder === sourceGroup))
+    );
   }
 
   it('main group can send to any group', () => {
@@ -654,11 +662,11 @@ describe('register_group success', () => {
     );
 
     // Verify group was registered in DB
-    const group = getRegisteredGroup('new@g.us');
-    expect(group).toBeDefined();
-    expect(group!.name).toBe('New Group');
-    expect(group!.folder).toBe('new-group');
-    expect(group!.trigger).toBe('@Andy');
+    const groupArr = getRegisteredGroup('new@g.us');
+    expect(groupArr).toHaveLength(1);
+    expect(groupArr[0].name).toBe('New Group');
+    expect(groupArr[0].folder).toBe('new-group');
+    expect(groupArr[0].trigger).toBe('@Andy');
   });
 
   it('register_group rejects request with missing fields', async () => {
@@ -674,6 +682,6 @@ describe('register_group success', () => {
       deps,
     );
 
-    expect(getRegisteredGroup('partial@g.us')).toBeUndefined();
+    expect(getRegisteredGroup('partial@g.us')).toHaveLength(0);
   });
 });

@@ -1,0 +1,9 @@
+// Syncthing ignore patterns for NanoClaw
+node_modules
+dist
+.tmp-*
+logs
+groups/*/logs
+*.log
+.claude/worktrees
+// .git is synced intentionally

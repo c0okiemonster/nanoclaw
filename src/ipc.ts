@@ -12,7 +12,7 @@ import { RegisteredGroup } from './types.js';
 
 export interface IpcDeps {
   sendMessage: (jid: string, text: string) => Promise<void>;
-  registeredGroups: () => Record<string, RegisteredGroup>;
+  registeredGroups: () => Record<string, RegisteredGroup[]>;
   registerGroup: (jid: string, group: RegisteredGroup) => void;
   syncGroups: (force: boolean) => Promise<void>;
   getAvailableGroups: () => AvailableGroup[];
@@ -55,8 +55,10 @@ export function startIpcWatcher(deps: IpcDeps): void {
 
     // Build folder→isMain lookup from registered groups
     const folderIsMain = new Map<string, boolean>();
-    for (const group of Object.values(registeredGroups)) {
-      if (group.isMain) folderIsMain.set(group.folder, true);
+    for (const groups of Object.values(registeredGroups)) {
+      for (const group of groups) {
+        if (group.isMain) folderIsMain.set(group.folder, true);
+      }
     }
 
     for (const sourceGroup of groupFolders) {
@@ -76,10 +78,11 @@ export function startIpcWatcher(deps: IpcDeps): void {
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
               if (data.type === 'message' && data.chatJid && data.text) {
                 // Authorization: verify this group can send to this chatJid
-                const targetGroup = registeredGroups[data.chatJid];
+                const targetGroups = registeredGroups[data.chatJid];
                 if (
                   isMain ||
-                  (targetGroup && targetGroup.folder === sourceGroup)
+                  (targetGroups &&
+                    targetGroups.some((g) => g.folder === sourceGroup))
                 ) {
                   await deps.sendMessage(data.chatJid, data.text);
                   logger.info(
@@ -190,12 +193,25 @@ export async function processTaskIpc(
       ) {
         // Resolve the target group from JID
         const targetJid = data.targetJid as string;
-        const targetGroupEntry = registeredGroups[targetJid];
+        const targetGroupEntries = registeredGroups[targetJid];
 
-        if (!targetGroupEntry) {
+        if (!targetGroupEntries || targetGroupEntries.length === 0) {
           logger.warn(
             { targetJid },
             'Cannot schedule task: target group not registered',
+          );
+          break;
+        }
+
+        // Use the first registered group for this JID (or find by folder if specified)
+        const targetGroupEntry = data.groupFolder
+          ? targetGroupEntries.find((g) => g.folder === data.groupFolder)
+          : targetGroupEntries[0];
+
+        if (!targetGroupEntry) {
+          logger.warn(
+            { targetJid, groupFolder: data.groupFolder },
+            'Cannot schedule task: target group folder not found',
           );
           break;
         }
@@ -444,7 +460,10 @@ export async function processTaskIpc(
         // Defense in depth: agent cannot set isMain via IPC.
         // Preserve isMain from the existing registration so IPC config
         // updates (e.g. adding additionalMounts) don't strip the flag.
-        const existingGroup = registeredGroups[data.jid];
+        const existingGroups = registeredGroups[data.jid];
+        const existingEntry = existingGroups?.find(
+          (g) => g.folder === data.folder,
+        );
         deps.registerGroup(data.jid, {
           name: data.name,
           folder: data.folder,
@@ -452,7 +471,7 @@ export async function processTaskIpc(
           added_at: new Date().toISOString(),
           containerConfig: data.containerConfig,
           requiresTrigger: data.requiresTrigger,
-          isMain: existingGroup?.isMain,
+          isMain: existingEntry?.isMain,
         });
       } else {
         logger.warn(

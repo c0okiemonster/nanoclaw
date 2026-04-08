@@ -1,0 +1,176 @@
+#!/bin/bash
+# NanoClaw service control — manages NanoClaw + OneCLI + Docker
+
+SERVICE="com.nanoclaw"
+PLIST="$HOME/Library/LaunchAgents/$SERVICE.plist"
+ONECLI_DIR="$HOME/.onecli"
+
+# Resolve the NanoClaw directory (where this script lives → ../)
+SCRIPT_DIR="$(cd "$(dirname "$(readlink "$0" || echo "$0")")" && pwd)"
+NANOCLAW_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+LOG="$NANOCLAW_DIR/logs/nanoclaw.log"
+
+install_plist() {
+  NODE="$(which node)"
+  if [ -z "$NODE" ]; then
+    echo "Error: node not found in PATH"
+    exit 1
+  fi
+  mkdir -p "$NANOCLAW_DIR/logs"
+  cat > "$PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>$SERVICE</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$NODE</string>
+        <string>$NANOCLAW_DIR/dist/index.js</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>$NANOCLAW_DIR</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin</string>
+        <key>HOME</key>
+        <string>$HOME</string>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>$NANOCLAW_DIR/logs/nanoclaw.log</string>
+    <key>StandardErrorPath</key>
+    <string>$NANOCLAW_DIR/logs/nanoclaw.error.log</string>
+</dict>
+</plist>
+EOF
+  echo "Plist installed at $PLIST"
+}
+
+ensure_docker() {
+  if ! docker info &>/dev/null; then
+    echo "Starting Docker..."
+    open -a Docker
+    local tries=0
+    while ! docker info &>/dev/null && [ $tries -lt 30 ]; do
+      sleep 2
+      tries=$((tries + 1))
+    done
+    if ! docker info &>/dev/null; then
+      echo "Error: Docker failed to start"
+      exit 1
+    fi
+    echo "Docker is ready"
+  fi
+}
+
+ensure_onecli() {
+  if curl -s -o /dev/null -w "%{http_code}" http://localhost:10254/api/user 2>/dev/null | grep -q "200"; then
+    return
+  fi
+  if [ ! -f "$ONECLI_DIR/docker-compose.yml" ]; then
+    echo "Warning: OneCLI not installed at $ONECLI_DIR"
+    return
+  fi
+  echo "Starting OneCLI..."
+  docker compose -f "$ONECLI_DIR/docker-compose.yml" up -d 2>/dev/null
+  local tries=0
+  while ! curl -s -o /dev/null -w "%{http_code}" http://localhost:10254/api/user 2>/dev/null | grep -q "200" && [ $tries -lt 15 ]; do
+    sleep 2
+    tries=$((tries + 1))
+  done
+  if curl -s -o /dev/null -w "%{http_code}" http://localhost:10254/api/user 2>/dev/null | grep -q "200"; then
+    echo "OneCLI is ready"
+  else
+    echo "Warning: OneCLI failed to start — containers will have no credentials"
+  fi
+}
+
+ensure_built() {
+  if [ ! -d "$NANOCLAW_DIR/dist" ]; then
+    echo "Building NanoClaw..."
+    if [ ! -d "$NANOCLAW_DIR/node_modules" ]; then
+      npm install --prefix "$NANOCLAW_DIR"
+    fi
+    npm run build --prefix "$NANOCLAW_DIR"
+  fi
+}
+
+stop_onecli() {
+  if [ -f "$ONECLI_DIR/docker-compose.yml" ]; then
+    docker compose -f "$ONECLI_DIR/docker-compose.yml" down 2>/dev/null
+    echo "OneCLI stopped"
+  fi
+}
+
+case "${1:-}" in
+  start)
+    if launchctl list | grep -q "$SERVICE"; then
+      echo "NanoClaw is already running"
+      exit 0
+    fi
+    ensure_docker
+    ensure_onecli
+    ensure_built
+    if [ ! -f "$PLIST" ]; then
+      echo "No plist found — installing..."
+      install_plist
+    fi
+    launchctl load "$PLIST"
+    sleep 2
+    if launchctl list | grep -q "$SERVICE"; then
+      echo "NanoClaw started"
+    else
+      echo "Failed to start NanoClaw — check $LOG"
+      exit 1
+    fi
+    ;;
+  stop)
+    if launchctl list | grep -q "$SERVICE"; then
+      launchctl unload "$PLIST"
+      echo "NanoClaw stopped"
+    else
+      echo "NanoClaw is not running"
+    fi
+    stop_onecli
+    ;;
+  restart)
+    ensure_docker
+    ensure_onecli
+    launchctl kickstart -k "gui/$(id -u)/$SERVICE" 2>/dev/null
+    echo "NanoClaw restarted"
+    ;;
+  status)
+    if launchctl list | grep -q "$SERVICE"; then
+      PID=$(launchctl list | grep "$SERVICE" | awk '{print $1}')
+      echo "NanoClaw:  running (PID: $PID)"
+    else
+      echo "NanoClaw:  not running"
+    fi
+    if curl -s -o /dev/null -w "%{http_code}" http://localhost:10254/api/user 2>/dev/null | grep -q "200"; then
+      echo "OneCLI:    running"
+    else
+      echo "OneCLI:    not running"
+    fi
+    if docker info &>/dev/null; then
+      echo "Docker:    running"
+    else
+      echo "Docker:    not running"
+    fi
+    ;;
+  logs)
+    tail -f "$LOG"
+    ;;
+  setup)
+    install_plist
+    echo "Run 'nanoclaw start' to start"
+    ;;
+  *)
+    echo "Usage: nanoclaw {start|stop|restart|status|logs|setup}"
+    ;;
+esac

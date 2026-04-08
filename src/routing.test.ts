@@ -89,12 +89,14 @@ describe('getAvailableGroups', () => {
     );
 
     _setRegisteredGroups({
-      'reg@g.us': {
-        name: 'Registered',
-        folder: 'registered',
-        trigger: '@Andy',
-        added_at: '2024-01-01T00:00:00.000Z',
-      },
+      'reg@g.us': [
+        {
+          name: 'Registered',
+          folder: 'registered',
+          trigger: '@Andy',
+          added_at: '2024-01-01T00:00:00.000Z',
+        },
+      ],
     });
 
     const groups = getAvailableGroups();

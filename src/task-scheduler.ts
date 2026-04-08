@@ -63,11 +63,11 @@ export function computeNextRun(task: ScheduledTask): string | null {
 }
 
 export interface SchedulerDependencies {
-  registeredGroups: () => Record<string, RegisteredGroup>;
+  registeredGroups: () => Record<string, RegisteredGroup[]>;
   getSessions: () => Record<string, string>;
   queue: GroupQueue;
   onProcess: (
-    groupJid: string,
+    groupKey: string,
     proc: ChildProcess,
     containerName: string,
     groupFolder: string,
@@ -109,9 +109,9 @@ async function runTask(
   );
 
   const groups = deps.registeredGroups();
-  const group = Object.values(groups).find(
-    (g) => g.folder === task.group_folder,
-  );
+  const group = Object.values(groups)
+    .flat()
+    .find((g) => g.folder === task.group_folder);
 
   if (!group) {
     logger.error(
@@ -165,7 +165,7 @@ async function runTask(
     if (closeTimer) return; // already scheduled
     closeTimer = setTimeout(() => {
       logger.debug({ taskId: task.id }, 'Closing task container after result');
-      deps.queue.closeStdin(task.chat_jid);
+      deps.queue.closeStdin(task.group_folder);
     }, TASK_CLOSE_DELAY_MS);
   };
 
@@ -183,7 +183,12 @@ async function runTask(
         script: task.script || undefined,
       },
       (proc, containerName) =>
-        deps.onProcess(task.chat_jid, proc, containerName, task.group_folder),
+        deps.onProcess(
+          task.group_folder,
+          proc,
+          containerName,
+          task.group_folder,
+        ),
       async (streamedOutput: ContainerOutput) => {
         if (streamedOutput.result) {
           result = streamedOutput.result;
@@ -192,7 +197,7 @@ async function runTask(
           scheduleClose();
         }
         if (streamedOutput.status === 'success') {
-          deps.queue.notifyIdle(task.chat_jid);
+          deps.queue.notifyIdle(task.group_folder);
           scheduleClose(); // Close promptly even when result is null (e.g. IPC-only tasks)
         }
         if (streamedOutput.status === 'error') {
@@ -264,7 +269,7 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
           continue;
         }
 
-        deps.queue.enqueueTask(currentTask.chat_jid, currentTask.id, () =>
+        deps.queue.enqueueTask(currentTask.group_folder, currentTask.id, () =>
           runTask(currentTask, deps),
         );
       }

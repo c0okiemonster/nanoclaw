@@ -55,7 +55,7 @@ const GROUP_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
 export interface WhatsAppChannelOpts {
   onMessage: OnInboundMessage;
   onChatMetadata: OnChatMetadata;
-  registeredGroups: () => Record<string, RegisteredGroup>;
+  registeredGroups: () => Record<string, RegisteredGroup[]>;
 }
 
 export class WhatsAppChannel implements Channel {
@@ -301,9 +301,15 @@ export class WhatsAppChannel implements Channel {
             if (isImageMessage(msg)) {
               try {
                 const buffer = await downloadMediaMessage(msg, 'buffer', {});
-                const groupDir = path.join(GROUPS_DIR, groups[chatJid].folder);
+                const groupEntry = groups[chatJid]?.[0];
+                if (!groupEntry) continue;
+                const groupDir = path.join(GROUPS_DIR, groupEntry.folder);
                 const caption = normalized?.imageMessage?.caption ?? '';
-                const result = await processImage(buffer as Buffer, groupDir, caption);
+                const result = await processImage(
+                  buffer as Buffer,
+                  groupDir,
+                  caption,
+                );
                 if (result) {
                   content = result.content;
                 }
